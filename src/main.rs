@@ -10,207 +10,71 @@ use pw::{
     properties, spa, 
     MainLoop, Context
 };
-use crate::spa::format::{
-    MediaType,
-    MediaSubtype,
-    FormatProperties,
 
-};
+mod stream;
+mod ffmpeg;
 
-use crate::spa::Direction;
-
-
-//use clap::{Clap, command, arg, Subcommand};
 use clap::Parser;
-use spa::pod::Pod;
+use stream::init_pipe;
+use std::process::{Command, Stdio, Child};
+use std::io::prelude::*;
 
-struct UserData {
-    format: spa::param::video::VideoInfoRaw,
-}
+//struct UserData {
+//    format: spa::param::video::VideoInfoRaw,
+//}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[clap(short, long = "The target object id to connect to")]
+    ///Specify the stream ID to record
+    #[clap(short, long = "stream-id")]
     target: Option<u32>,
+    ///Exit after printing the stream info
+    #[clap(short, long = "Check-format")]
+    check: bool,
 }
 pub fn main() -> Result<(), pw::Error> {
-    pw::init();
-
     let opt = Args::parse();
-
-    let mainloop = MainLoop::new()?;
-    let context = Context::new(&mainloop)?;
-    let core = context.connect(None)?;
-
-    let data = UserData {
-        format: Default::default(),
-    };
-
-    let stream = pw::stream::Stream::new(
-        &core,
-        "video-test",
-        properties! {
-            *pw::keys::MEDIA_TYPE => "Video",
-            *pw::keys::MEDIA_CATEGORY => "Capture",
-            *pw::keys::MEDIA_ROLE => "Camera",
-        },
-    )?;
-
-    /*let stream = pw::stream::Stream::<UserData>::with_user_data(
-        &mainloop,
-        "video-test",
-        ,
-        data,
-    )*/
-
-    let _listener = stream
-        .add_local_listener_with_user_data(data)
-        .state_changed(|old, new| {
-            println!("State changed: {:?} -> {:?}", old, new);
-        })
-        .param_changed(|_, id, user_data, param| {
-            let Some(param) = param else {
-                return;
-            };
-            if id != pw::spa::param::ParamType::Format.as_raw() {
-                return;
-            }
-
-            let (media_type, media_subtype) =
-                match pw::spa::param::format_utils::parse_format(param) {
-                    Ok(v) => v,
-                    Err(_) => return,
-                };
-
-            if media_type != MediaType::Video
-                || media_subtype != MediaSubtype::Raw
-            {
-                return;
-            }
-
-            user_data
-                .format
-                .parse(param)
-                .expect("Failed to parse param changed to VideoInfoRaw");
-
-            println!("got video format:");
-            println!(
-                "  format: {} ({:?})",
-                user_data.format.format().as_raw(),
-                user_data.format.format()
-            );
-            println!(
-                "  size: {}x{}",
-                user_data.format.size().width,
-                user_data.format.size().height
-            );
-            println!(
-                "  framerate: {}/{}",
-                user_data.format.framerate().num,
-                user_data.format.framerate().denom
-            );
-
-            // prepare to render video of this size
-        })
-        .process(|stream, _| {
-            match stream.dequeue_buffer() {
-                None => println!("out of buffers"),
-                Some(mut buffer) => {
-                    let datas = buffer.datas_mut();
-                    if datas.is_empty() {
-                        return;
-                    }
-
-                    // copy frame data to screen
-                    let data = &mut datas[0];
-                    println!("got a frame of size {}", data.chunk().size());
-                }
-            }
-        })
-        .register()?;
-
-    println!("Created stream {:#?}", stream);
-
-    let obj = pw::spa::pod::object!(
-        pw::spa::utils::SpaTypes::ObjectParamFormat,
-        pw::spa::param::ParamType::EnumFormat,
-        pw::spa::pod::property!(
-            FormatProperties::MediaType,
-            Id,
-            MediaType::Video
-        ),
-        pw::spa::pod::property!(
-            FormatProperties::MediaSubtype,
-            Id,
-            MediaSubtype::Raw
-        ),
-        pw::spa::pod::property!(
-            FormatProperties::VideoFormat,
-            Choice,
-            Enum,
-            Id,
-            pw::spa::param::video::VideoFormat::RGB,
-            pw::spa::param::video::VideoFormat::RGB,
-            pw::spa::param::video::VideoFormat::RGBA,
-            pw::spa::param::video::VideoFormat::RGBx,
-            pw::spa::param::video::VideoFormat::BGRx,
-            pw::spa::param::video::VideoFormat::YUY2,
-            pw::spa::param::video::VideoFormat::I420,
-        ),
-        pw::spa::pod::property!(
-            FormatProperties::VideoSize,
-            Choice,
-            Range,
-            Rectangle,
-            pw::spa::utils::Rectangle {
-                width: 320,
-                height: 240
-            },
-            pw::spa::utils::Rectangle {
-                width: 1,
-                height: 1
-            },
-            pw::spa::utils::Rectangle {
-                width: 4096,
-                height: 4096
-            }
-        ),
-        pw::spa::pod::property!(
-            FormatProperties::VideoFramerate,
-            Choice,
-            Range,
-            Fraction,
-            pw::spa::utils::Fraction { num: 25, denom: 1 },
-            pw::spa::utils::Fraction { num: 0, denom: 1 },
-            pw::spa::utils::Fraction {
-                num: 1000,
-                denom: 1
-            }
-        ),
-    );
-    let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
-        std::io::Cursor::new(Vec::new()),
-        &pw::spa::pod::Value::Object(obj),
-    )
-    .unwrap()
-    .0
-    .into_inner();
-
-    let mut params = [Pod::from_bytes(&values).unwrap()];
-
-    stream.connect(
-        Direction::Input,
-        opt.target,
-        pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
-        &mut params,
-    )?;
-
-    println!("Connected stream");
-
-    mainloop.run();
-
-    Ok(())
+    let id = opt.target;
+    let check = opt.check;
+    match id {
+        Some(x) => {
+            return init_pipe(x, check);
+        }
+        None => {
+            return init_pipe(check_id(), check);
+        }
+    }    
 }
 
 
+fn check_id() -> u32 {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("pw-dump | jq '.[] | select(.info.props[\"media.class\"] == \"Video/Source\") | .info.props.\"node.name\" + \" | \" + .info.props.\"node.description\" + \" | \" + (.id|tostring)' | head -n 40")
+        .output()
+        .expect("failed to execute process");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines: Vec<&str> = stdout.split('\n').collect();
+
+    if lines.last() == Some(&"") {
+        lines.pop();
+    }
+
+    println!("Please select a line:");
+    for (i, line) in lines.iter().enumerate() {
+        let out = line.replace("\"", "");
+        println!("{}. {}", i + 1, out);
+    }
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    let index = input.trim().parse::<usize>().unwrap() - 1;
+
+    let last_word = lines[index].split_whitespace().last().unwrap();
+    println!("The last word of the selected line is: {}", last_word.replace("\"", ""));
+
+    let id = last_word.replace("\"", "").parse::<u32>().unwrap();
+    return id;
+}
